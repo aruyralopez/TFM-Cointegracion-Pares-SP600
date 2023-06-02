@@ -1,0 +1,227 @@
+library(quantmod)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(grid)
+library(PerformanceAnalytics)
+library(car)
+library(urca)
+
+path_output= "/Users/Alejandro/OneDrive/Escritorio/TFM-2/datos"
+ruta_output= "/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2"
+
+################################################################################################
+## Funcion EqCurve en RDs diario
+
+funcion_eqc <- function(df,df3) {
+  
+  ####
+  ## Ajuste dataframe
+  df <- subset(df, fecha != "20051" & fecha != "20052")
+  df$pary <- sapply(strsplit(as.character(df$par), "_"), `[`, 1)
+  df$parx <- sapply(strsplit(as.character(df$par), "_"), `[`, 2)
+  rownames(df) <- NULL
+  
+  unique_vector <- unique(df3$par)
+  
+  date_begin <- as.Date("2006-01-01")
+  date_end <- as.Date("2022-10-31")
+  
+  date_range <- seq(date_begin, date_end, by = "day")
+  result <- data.frame(Date = date_range)
+  
+  for(i in unique_vector){
+    substraction <- subset(df, par==i)
+    
+    Activox=substraction$parx[1]
+    Activoy=substraction$pary[1]
+    stocks<- c(Activox,Activoy)
+    
+    tickers <- getSymbols(stocks, from=date_begin, to=date_end, auto.assign=TRUE)
+    
+    ETFS <- Cl(to.daily(Ad(get(tickers[1]))))
+    
+    for (j in 2:length(tickers)) { ETFS <- merge(ETFS, Cl(to.daily(Ad(get(tickers[j]))))) }
+    colnames(ETFS) <- c(Activox,Activoy)
+    ETFS=na.omit(ETFS)
+    ETFS <- ETFS[ETFS[,2]>=0,]
+    
+    returns.data <- CalculateReturns(ETFS,method="discrete")
+    colnames(returns.data)=c(paste0("Rentab_",Activox),paste0("Rentab_",Activoy))
+    ETFS=cbind(ETFS,returns.data)
+    ETFS=as.data.frame(ETFS)
+    
+    ETFS$Date=rownames(ETFS)
+    ETFS$Date <- ymd(ETFS$Date)
+    ETFS$year = year(ETFS$Date)
+    ETFS$semester=semester(ETFS$Date)
+    ETFS$fecha=paste0(year(ETFS$Date),ETFS$semester)
+    
+    vector_fechas=substraction[,c("fecha")]
+    
+    for (f in 1:length(vector_fechas)) {
+      
+      tabla=ETFS[ETFS$fecha==vector_fechas[f],]
+
+      # regresión entre ambos activos
+      modelo = lm(tabla[,2]~tabla[,1], data=tabla)
+      
+      # Captura de la pendiente y el intercepto
+      intercept=modelo$coefficients[1]
+      slope=modelo$coefficients[2]
+      
+      # Creación tabla resumen para la fecha
+      vector=c(modelo$coefficients[1],modelo$coefficients[2])
+      
+      # conversión en data.frame y transponer tabla
+      vector=as.data.frame(vector)
+      vector <- t(vector[,1:1])
+      colnames(vector)=c("intercepto","pendiente")
+      vector=as.data.frame(vector)
+      vector$fecha=vector_fechas[f]
+      
+      if (f == 1){
+        tab_f <- vector
+        
+      }else if (f != 1 ) {
+        tab_f <- rbind(tab_f,vector)
+      }
+    }
+    
+    tab_f$fecha=as.numeric(tab_f$fecha)
+    
+    tab_f$interceptolag= dplyr::lag(tab_f$intercepto,n=1)
+    tab_f$pendientelag=  dplyr::lag(tab_f$pendiente,n=1)
+    
+    ETFS$fecha=as.numeric(ETFS$fecha)
+    ETFS = left_join(ETFS, tab_f ,by = c("fecha"))
+    row.names(ETFS)=ETFS$Date 
+    ETFS$Var_cointeg= ETFS$interceptolag+ETFS$pendientelag*ETFS[,1]
+    ETFS$diff_coint_real= ETFS$Var_cointeg-ETFS[,2]
+    
+    ETFS$diff_coint_real_lag=dplyr::lag(ETFS$diff_coint_real,n=1)
+    ETFS$signal_activoy <- case_when(ETFS$diff_coint_real_lag>0  ~ 1,
+                                     ETFS$diff_coint_real_lag<=0~ -1, TRUE ~ 0)
+    ETFS$signal_activox <- case_when(ETFS$diff_coint_real_lag<0  ~ 1,
+                                     ETFS$diff_coint_real_lag>=0 ~ -1, TRUE ~ 0)
+    
+    ETFS$rentab_estrat_activoy= ETFS$signal_activoy*ETFS[,4]
+    ETFS$rentab_estrat_activox= ETFS$signal_activox*ETFS[,3]
+    ETFS$rentab_estrategia=(0.5*ETFS$rentab_estrat_activoy)+(0.5*ETFS$rentab_estrat_activox)
+    ETFS$eqcurve_estrategia=100
+    
+    for (fila in 2:nrow(ETFS)) {
+      ETFS$eqcurve_estrategia[fila]=(ETFS$eqcurve_estrategia[(fila-1)]*(1+ETFS$rentab_estrategia[fila]))
+    }
+    ETFS <- ETFS[,c("Date","eqcurve_estrategia")]
+    result <- merge(result, ETFS, by = "Date", all.x = TRUE)
+    result = rename(result, c(eqcurve_estrategia = i))
+  }
+  result <- na.omit(result)
+  return(result)
+}
+
+################################################################################################
+
+
+### 11 sectores
+
+## 1 Communication Services
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Communication_Services"
+result_Communication_Services <- read.csv(file.path(path_output,"result_Communication_Services.csv"))
+rcs3 <- read.csv(file.path(path_output,"rcs3.csv"))
+
+rcs3d <- funcion_eqc(result_Communication_Services,rcs3)
+write.csv(rcs3d,file.path(ruta_output,"rcs3d.csv"),row.names = F)
+
+
+## 2 Consumer Discretionary
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Consumer_Discretionary"
+result_Consumer_Discretionary <- read.csv(file.path(path_output,"result_Consumer_Discretionary.csv"))
+rcd3 <- read.csv(file.path(path_output,"rcd3.csv"))
+
+rcd3d <- funcion_eqc(result_Consumer_Discretionary,rcd3)
+write.csv(rcd3d,file.path(ruta_output,"rcd3d.csv"),row.names = F)
+
+
+## 3 Consumer Staples
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Consumer_Staples"
+result_Consumer_Staples <- read.csv(file.path(path_output,"result_Consumer_Staples.csv"))
+rcst3 <- read.csv(file.path(path_output,"rcst3.csv"))
+
+rcst3d <- funcion_eqc(result_Consumer_Staples,rcst3)
+write.csv(rcst3d,file.path(ruta_output,"rcst3d.csv"),row.names = F)
+
+
+## 4 Energy 
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Energy"
+result_Energy <- read.csv(file.path(path_output,"result_Energy.csv"))
+re3 <- read.csv(file.path(path_output,"re3.csv"))
+
+re3d <- funcion_eqc(result_Energy,re3)
+write.csv(re3d,file.path(ruta_output,"re3d.csv"),row.names = F)
+
+
+## 5 Financials
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Financials"
+result_Financials <- read.csv(file.path(path_output,"result_Financials.csv"))
+rf3 <- read.csv(file.path(path_output,"rf3.csv"))
+
+rf3d <- funcion_eqc(result_Financials,rf3)
+write.csv(rf3d,file.path(ruta_output,"rf3d.csv"),row.names = F)
+
+
+## 6 Health Care
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Health_Care"
+result_Health_Care <- read.csv(file.path(path_output,"result_Health_Care.csv"))
+rhc3 <- read.csv(file.path(path_output,"rhc3.csv"))
+
+rhc3d <- funcion_eqc(result_Health_Care,rhc3)
+write.csv(rhc3d,file.path(ruta_output,"rhc3d.csv"),row.names = F)
+
+
+## 7 Industrials
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Industrials"
+result_Industrials <- read.csv(file.path(path_output,"result_Industrials.csv"))
+ri3 <- read.csv(file.path(path_output,"ri3.csv"))
+
+ri3d <- funcion_eqc(result_Industrials,ri3)
+write.csv(ri3d,file.path(ruta_output,"ri3d.csv"),row.names = F)
+
+
+## 8 Information Technology 
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Information_Technology"
+result_Information_Technology <- read.csv(file.path(path_output,"result_Information_Technology.csv"))
+rit3 <- read.csv(file.path(path_output,"rit3.csv"))
+
+rit3d <- funcion_eqc(result_Information_Technology,rit3)
+write.csv(rit3d,file.path(ruta_output,"rit3d.csv"),row.names = F)
+
+
+## 9 Materials
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Materials"
+result_Materials <- read.csv(file.path(path_output,"result_Materials.csv"))
+rm3 <- read.csv(file.path(path_output,"rm3.csv"))
+
+rm3d <- funcion_eqc(result_Materials,rm3)
+write.csv(rm3d,file.path(ruta_output,"rm3d.csv"),row.names = F)
+
+
+## 10 Real Estate 
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Real_Estate"
+result_Real_Estate <- read.csv(file.path(path_output,"result_Real_Estate.csv"))
+rre3 <- read.csv(file.path(path_output,"rre3.csv"))
+
+rre3d <- funcion_eqc(result_Real_Estate,rre3)
+write.csv(rre3d,file.path(ruta_output,"rre3d.csv"),row.names = F)
+
+
+## 11 Utilities
+ruta_salida="/Users/Alejandro/OneDrive/Escritorio/TFM-2/output2/Utilities"
+result_Utilities <- read.csv(file.path(path_output,"result_Utilities.csv"))
+ru3 <- read.csv(file.path(path_output,"ru3.csv"))
+
+ru3d <- funcion_eqc(result_Utilities,ru3)
+write.csv(ru3d,file.path(ruta_output,"ru3d.csv"),row.names = F)
+
